@@ -53,3 +53,7 @@ python -m PyInstaller --name "Bennet" --windowed --onefile bennet.py
 ```
 
 This will produce a self-contained executable named `Bennet.exe` that you can run on Windows without a separate Python installation.
+
+## Windows Smart App Control Issue
+
+If the .exe is blocked from running by Windows Smart App Control and there is no way to "Run Anyway", there is no other alternative than to either turn off Windows Smart App Control or to download and run the Python/Build the executable yourself.
