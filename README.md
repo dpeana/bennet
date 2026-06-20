@@ -1,6 +1,6 @@
 # Bennet PDF Manager
 
-Bennet is a desktop PDF manager built with PyQt6 and [pypdf](https://pypi.org/project/pypdf/). It scans a chosen "home" directory for PDF files, indexes them, and lets you quickly search, preview, and edit their metadata.
+Inspired by the sacred knowledge trove of Mr.Bennet's library from Jane Austin's _Pride and Prejudice_, Bennet is a desktop PDF manager built with PyQt6 and [pypdf](https://pypi.org/project/pypdf/). It scans a chosen "home" directory for PDF files, indexes them, and lets you quickly search, preview, and edit their metadata.
 
 ## Features
 
