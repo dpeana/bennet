@@ -42,6 +42,8 @@ On first launch, click **"Choose Home…"** to select the directory that contain
 
 ## Building a Windows executable
 
+Within bin/dist you can find Bennet.exe. If you are running 64-bit Windows, it might work. Otherwise, you can run the Python or build the executable yourself with the instructions provided below.
+
 You can build a standalone `.exe` using PyInstaller:
 
 ```bash
