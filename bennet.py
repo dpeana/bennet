@@ -1,3 +1,5 @@
+# To build an .exe from this, run this from the directory you want it built in: python -m PyInstaller --name "Bennet" --windowed --onefile bennet.py 
+
 from __future__ import annotations
 
 import json
@@ -24,14 +26,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget
 )
 
-
 from pypdf import PdfReader, PdfWriter
 
 
 APP_ORG = "dpeana"
 APP_NAME = "BennetPDFManager"
 CACHE_FILENAME = ".bennet_pdf_cache.json"
-CACHE_SCHEMA_VERSION = 4
+CACHE_SCHEMA_VERSION = 5
 CONTENT_PAGE_LIMIT = 5
 HEADER_STATE_KEY = "table/header_state"
 WINDOW_GEOMETRY_KEY = "window/geometry"
@@ -51,6 +52,7 @@ class PDFRecord:
     author: str = ""
     subject: str = ""
     year: str = ""
+    notes: str = ""
     content: str = ""
     mtime: float = 0.0
     size: int = 0
@@ -59,6 +61,13 @@ class PDFRecord:
     @property
     def display_title(self) -> str:
         return self.title or Path(self.path).stem
+
+
+def record_from_dict(d: Dict[str, Any]) -> PDFRecord:
+    allowed = {f.name for f in PDFRecord.__dataclass_fields__.values()}
+    cleaned = {k: v for k, v in d.items() if k in allowed}
+    cleaned.setdefault("notes", "")
+    return PDFRecord(**cleaned)
 
 
 def is_within_directory(path: Path, root: Path) -> bool:
@@ -108,7 +117,6 @@ def parse_year_from_date_string(text: str) -> str:
 
 
 def meta_get(meta, attr: str, key: str) -> str:
-    """Safely read a value from a pypdf DocumentInformation object or a dict."""
     value = None
     try:
         value = getattr(meta, attr, None)
@@ -124,20 +132,14 @@ def meta_get(meta, attr: str, key: str) -> str:
     return safe_str(value)
 
 
-# ---------------------------------------------------------------------------
-#  YEAR DETECTION
-# ---------------------------------------------------------------------------
-
 def _plausible_year(y: int) -> bool:
     return 1900 <= y <= CURRENT_YEAR
 
 
 def extract_year_from_text(text: str) -> str:
-    """Find the most likely PUBLICATION year in page text."""
     if not text:
         return ""
 
-    # 1. Explicit publication phrases.
     priority_patterns = [
         r"\bpublished\s+(?:online\s+)?(?:on\s+)?(?:\w+\.?\s+\d{1,2},?\s+)?((?:19|20)\d{2})\b",
         r"\baccepted\s+(?:\w+\.?\s+\d{1,2},?\s+)?((?:19|20)\d{2})\b",
@@ -151,7 +153,6 @@ def extract_year_from_text(text: str) -> str:
             if _plausible_year(y):
                 return str(y)
 
-    # 2. "Month YYYY" or "DD Month YYYY" common in headers/footers
     months = (r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
               r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
               r"nov(?:ember)?|dec(?:ember)?")
@@ -166,7 +167,6 @@ def extract_year_from_text(text: str) -> str:
         if candidates:
             return str(min(candidates, key=lambda y: (-candidates.count(y), y)))
 
-    # 3. Most frequent plausible year before references
     lines = text.splitlines()
     search_text = ""
     for line in lines:
@@ -184,8 +184,6 @@ def extract_year_from_text(text: str) -> str:
 
 
 def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
-    """Decide the best year. Page text is trusted before file mtime."""
-    # 1. Custom /Year tag written by this app on a previous save.
     if meta and hasattr(meta, "get"):
         try:
             y = parse_year_from_date_string(str(meta.get("/Year", "")))
@@ -194,12 +192,10 @@ def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
         except Exception:
             pass
 
-    # 2. Publication year found in the document text.
     text_year = extract_year_from_text(first_page_text)
     if text_year:
         return text_year
 
-    # 3. PDF embedded creation/modification date.
     candidates: List[str] = []
     for attr in ("creation_date", "modification_date"):
         try:
@@ -224,7 +220,6 @@ def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
         if y and _plausible_year(int(y)):
             return y
 
-    # 4. Last resort: file modification time.
     try:
         y = datetime.fromtimestamp(pdf_path.stat().st_mtime).year
         if _plausible_year(y):
@@ -234,10 +229,6 @@ def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-#  AUTHOR DETECTION
-# ---------------------------------------------------------------------------
-
 AUTHOR_BANNED = [
     "abstract", "introduction", "keywords", "journal", "conference", "proceedings",
     "doi:", "http", "www.", "received", "accepted", "published",
@@ -245,9 +236,20 @@ AUTHOR_BANNED = [
     "corresponding author", "supplementary material",
 ]
 
+NAME_TOKEN_RE = r"(?:[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+|[A-Z]\.)"
+FULL_NAME_RE = re.compile(rf"\b{NAME_TOKEN_RE}(?:\s+{NAME_TOKEN_RE}){{1,5}}\b")
+
+AUTHOR_NAME_BAD_WORDS = {
+    "abstract", "introduction", "keywords", "department", "university",
+    "institute", "laboratory", "school", "faculty", "college", "center",
+    "centre", "division", "academy", "hospital", "doi", "received",
+    "accepted", "published", "copyright", "optical", "tweezer", "tweezers",
+    "atom", "atoms", "imaging", "enhanced", "gray", "grey", "molasses",
+    "chemistry", "physics", "astronomy", "purdue", "indiana", "usa"
+}
+
 
 def is_all_caps_heading(text: str) -> bool:
-    """Detect short all-caps section headers like 'COLD ATOMS'."""
     text = normalize_whitespace(text)
     if not text:
         return False
@@ -258,24 +260,7 @@ def is_all_caps_heading(text: str) -> bool:
     return letters.isupper() and not has_marker and len(text.split()) <= 8
 
 
-def clean_author_text(text: str) -> str:
-    """Normalise an authors string: strip numbers/markers, unify separators."""
-    text = normalize_whitespace(text)
-    # Remove affiliation numbers and footnote symbols throughout
-    text = re.sub(r"[\d\*\u2020\u2021\u00a7\u00b6‡†§¶]+", "", text)
-    # Convert ' and ' / ' & ' / ';' into commas
-    text = re.sub(r"\s+and\s+", ", ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*&\s*", ", ", text)
-    text = re.sub(r"\s*;\s*", ", ", text)
-    # Tidy comma spacing and collapse duplicate commas
-    text = re.sub(r"\s*,\s*", ", ", text)
-    text = re.sub(r"(,\s*){2,}", ", ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip(" ,;.")
-
-
 def _is_name_token(raw: str) -> bool:
-    """True if a single token looks like part of a person's name."""
     clean = re.sub(r"[^A-Za-z\u00C0-\u024F\-\.']", "", raw)
     if not clean:
         return False
@@ -288,63 +273,109 @@ def _is_name_token(raw: str) -> bool:
     return clean[0].isupper()
 
 
-def looks_like_author_line(line: str) -> bool:
-    """Heuristic gate: does this line look like a list of author names?"""
-    line = normalize_whitespace(line)
-    if not line:
-        return False
+def extract_author_names_from_text(text: str) -> List[str]:
+    text = normalize_whitespace(text)
+    if not text:
+        return []
 
-    if is_all_caps_heading(line):
-        return False
-    if is_affiliation_line(line):
-        return False
-    if is_body_text_line(line):
-        return False
+    text = re.sub(r"(?i)\bauthors?\s*:\s*", " ", text)
+    text = re.sub(r"\S+@\S+", " ", text)
+    text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"www\.\S+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdoi\s*:\s*\S+", " ", text, flags=re.IGNORECASE)
 
-    lower = line.lower()
-    hard_ban = any(token in lower for token in AUTHOR_BANNED)
+    text = re.sub(
+        r"\s*,\s*\d+(?:\s*,\s*\d+)*(?:\s*[\*\†\‡\§\¶#]+)*",
+        ", ",
+        text,
+    )
 
-    if len(line) > 350:
-        return False
-    if YEAR_RE.search(line):
-        return False
+    text = re.sub(
+        r"\s+\d+(?:\s*,\s*\d+)*(?:\s*[\*\†\‡\§\¶#]+)*(?=\s+[A-Z])",
+        ", ",
+        text,
+    )
 
-    # Strip affiliation markers/numbers into spaces, then split into candidate names.
-    clean_line = re.sub(r"[\d\*\u2020\u2021\u00a7\u00b6‡†§¶]+", " ", line)
-    clean_line = normalize_whitespace(clean_line)
-    parts = [p.strip() for p in re.split(r",|\band\b|;|&", clean_line, flags=re.IGNORECASE) if p.strip()]
-    if not parts:
-        return False
+    text = re.sub(
+        r"\s+\d+(?:\s*,\s*\d+)*(?:\s*[\*\†\‡\§\¶#]+)*\s*$",
+        " ",
+        text,
+    )
 
-    valid_name_count = 0
-    for part in parts:
-        words = [w for w in re.split(r"\s+", part) if w and len(w) > 0]
-        if not (1 <= len(words) <= 6):
+    text = re.sub(r"[\*\†\‡\§\¶#]+", " ", text)
+    text = re.sub(r"\s+and\s+", ", ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*&\s*", ", ", text)
+    text = re.sub(r"\s*;\s*", ", ", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = re.sub(r"(?:,\s*){2,}", ", ", text)
+    text = normalize_whitespace(text)
+
+    names: List[str] = []
+
+    for m in FULL_NAME_RE.finditer(text):
+        candidate = normalize_whitespace(m.group(0)).strip(" ,.;:")
+        if not candidate:
             continue
-        name_words = [w for w in words if _is_name_token(w)]
-        # Tolerate 1 junk token per name part (key fix for APS-style lines)
-        if words and len(name_words) >= max(1, len(words) - 1):
-            valid_name_count += 1
 
-    if valid_name_count == 0:
-        return False
-    if hard_ban and valid_name_count <= 1:
-        return False
-    return True
+        words = candidate.split()
+        if len(words) < 2 or len(words) > 6:
+            continue
+
+        lower_words = {re.sub(r"[^a-z]", "", w.lower()) for w in words}
+        if lower_words & AUTHOR_NAME_BAD_WORDS:
+            continue
+
+        lower_candidate = candidate.lower()
+        if any(bad in lower_candidate for bad in [
+            "optical tweezer",
+            "gray molasses",
+            "cold atom",
+            "lithium atom",
+            "department of",
+            "purdue university",
+        ]):
+            continue
+
+        real_words = [
+            w for w in words
+            if len(re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ]", "", w)) >= 2
+            and not w.endswith(".")
+        ]
+        if len(real_words) < 1:
+            continue
+
+        if candidate not in names:
+            names.append(candidate)
+
+    return names
+
+
+def clean_author_text(text: str) -> str:
+    names = extract_author_names_from_text(text)
+    if names:
+        return ", ".join(names)
+
+    text = normalize_whitespace(text)
+    text = re.sub(r"[\d\*\u2020\u2021\u00a7\u00b6‡†§¶#]+", "", text)
+    text = re.sub(r"\s+and\s+", ", ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*&\s*", ", ", text)
+    text = re.sub(r"\s*;\s*", ", ", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = re.sub(r"(?:,\s*){2,}", ", ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ,;.")
 
 
 def is_affiliation_line(line: str) -> bool:
     lower = normalize_whitespace(line).lower()
-    tokens = [
+    strong_tokens = [
         "department of", "dept. of", "dept of", "university", "institute",
         "laboratory", "laboratories", "school of", "faculty", "college",
         "center for", "centre for", "division of", "academy", "hospital",
-        "purdue university", "usa", "cambridge", "massachusetts",
     ]
-    if any(t in lower for t in tokens):
+    if any(t in lower for t in strong_tokens):
         return True
-    # Many affiliations end with a ZIP/postal code + country
-    if re.search(r"\b\d{4,5}\b.*\b(usa|united states|uk|canada|germany|france|china|japan)\b", lower):
+    if re.search(r"\b\d{4,6}\b.*\b(usa|united states|uk|canada|germany|france|china|japan)\b", lower):
         return True
     return False
 
@@ -354,26 +385,79 @@ def is_body_text_line(line: str) -> bool:
     words = lower.split()
     if not words:
         return False
-    # Explicit paragraph starts
     if lower.startswith(("abstract", "introduction", "we ", "this ", "here ", "in this ", "the realization",
                          "the ", "to ", "as a ", "in a ")):
         return True
-    # A long line ending in a sentence-terminal period (not an initial like "D.")
     if len(words) >= 12 and re.search(r"[a-z]{3,}\.$", lower):
         return True
     return False
+
+
+def is_publication_metadata_line(line: str) -> bool:
+    lower = normalize_whitespace(line).lower()
+    if not lower:
+        return False
+
+    return (
+        lower.startswith("(")
+        and any(t in lower for t in ["received", "accepted", "published"])
+    ) or any(t in lower for t in [
+        "doi:",
+        "received ",
+        "accepted ",
+        "published ",
+        "copyright",
+        "©",
+        "physrev",
+    ])
+
+
+def line_is_authorish(line: str) -> bool:
+    line = normalize_whitespace(line)
+    if not line:
+        return False
+
+    if is_all_caps_heading(line):
+        return False
+
+    if is_affiliation_line(line):
+        return False
+
+    if is_publication_metadata_line(line):
+        return False
+
+    names = extract_author_names_from_text(line)
+    if not names:
+        return False
+
+    has_affiliation_markers = bool(re.search(r"\d|[\*\†\‡\§\¶#]", line))
+    has_author_separators = bool(re.search(r",|\band\b|;", line, flags=re.IGNORECASE))
+
+    if len(names) >= 2:
+        return True
+
+    if len(names) == 1 and (has_affiliation_markers or has_author_separators):
+        return True
+
+    if len(names) == 1 and not is_body_text_line(line):
+        return True
+
+    return False
+
+
+def looks_like_author_line(line: str) -> bool:
+    return line_is_authorish(line)
 
 
 def guess_author_from_first_page(first_page_text: str, title: str) -> str:
     if not first_page_text:
         return ""
 
-    # Explicit "Author(s):" line wins.
     m = re.search(r"(?im)^\s*authors?\s*:\s*(.+)$", first_page_text)
     if m:
-        cleaned = clean_author_text(m.group(1))
-        if cleaned:
-            return cleaned
+        names = extract_author_names_from_text(m.group(1))
+        if names:
+            return ", ".join(names)
 
     lines = [normalize_whitespace(l) for l in first_page_text.splitlines()]
     lines = [l for l in lines if l]
@@ -382,71 +466,84 @@ def guess_author_from_first_page(first_page_text: str, title: str) -> str:
 
     title_norm = normalize_whitespace(title).lower()
 
-    def is_stop_line(line: str) -> bool:
-        """Lines that mark the end of the author block."""
-        if is_affiliation_line(line):
-            return True
-        if is_body_text_line(line):
-            return True
-        lower = line.lower()
-        if re.search(r"\b(received|accepted|published)\b", lower):
-            return True
-        if lower.startswith("(received") or lower.startswith("(dated"):
-            return True
-        return False
+    def collect_from_index(start_i: int) -> str:
+        collected: List[str] = []
 
-    def collect_from(start: int) -> List[str]:
-        block: List[str] = []
-        for line in lines[start:start + 15]:
-            if is_stop_line(line):
-                break
-            if is_all_caps_heading(line):
+        for line in lines[start_i:start_i + 12]:
+            if line_is_authorish(line):
+                collected.append(line)
                 continue
-            # Skip title continuation
-            if title_norm and line.lower() in title_norm:
-                continue
-            if looks_like_author_line(line):
-                block.append(line)
-            elif block:
-                break
-        return block
 
-    # Strategy 1: find title, authors are right after it.
-    title_idx = None
+            if collected:
+                break
+
+            if is_affiliation_line(line):
+                break
+
+            if is_publication_metadata_line(line):
+                break
+
+            if is_body_text_line(line):
+                break
+
+        if not collected:
+            return ""
+
+        names = extract_author_names_from_text(" ".join(collected))
+        return ", ".join(names) if names else ""
+
     if title_norm:
-        for i, line in enumerate(lines[:30]):
+        for i, line in enumerate(lines[:35]):
             ln = line.lower()
-            if ln == title_norm or (len(title_norm) > 15 and (ln in title_norm or title_norm in ln)):
-                title_idx = i
+
+            if ln == title_norm or (
+                len(title_norm) > 15
+                and (ln in title_norm or title_norm in ln)
+            ):
+                found = collect_from_index(i + 1)
+                if found:
+                    return found
                 break
 
-    collected: List[str] = []
-    if title_idx is not None:
-        collected = collect_from(title_idx + 1)
+    for i, line in enumerate(lines[:25]):
+        if is_all_caps_heading(line):
+            continue
 
-    # Strategy 2: skip all-caps header, scan from top.
-    if not collected:
-        start = 1 if lines and is_all_caps_heading(lines[0]) else 0
-        collected = collect_from(start)
+        if is_affiliation_line(line):
+            break
 
-    # Strategy 3: scan every line until first affiliation.
-    if not collected:
-        for i, line in enumerate(lines[:25]):
-            if is_stop_line(line):
+        if is_publication_metadata_line(line):
+            break
+
+        if line_is_authorish(line):
+            found = collect_from_index(i)
+            if found:
+                return found
+
+    first_affiliation_idx = None
+    for i, line in enumerate(lines[:40]):
+        if is_affiliation_line(line):
+            first_affiliation_idx = i
+            break
+
+    if first_affiliation_idx is not None:
+        candidate_lines: List[str] = []
+        for line in reversed(lines[max(0, first_affiliation_idx - 8):first_affiliation_idx]):
+            if is_all_caps_heading(line):
                 break
-            if looks_like_author_line(line):
-                collected = collect_from(i)
-                if collected:
-                    break
+            if is_publication_metadata_line(line):
+                break
+            if is_body_text_line(line) and not line_is_authorish(line):
+                break
+            if line_is_authorish(line):
+                candidate_lines.insert(0, line)
+            elif candidate_lines:
+                break
 
-    if collected:
-        full = clean_author_text(" ".join(collected))
-        parts = [p.strip() for p in full.split(",") if p.strip()]
-        seen: List[str] = []
-        for p in parts:
-            if p not in seen:
-                seen.append(p)
-        return ", ".join(seen)
+        if candidate_lines:
+            names = extract_author_names_from_text(" ".join(candidate_lines))
+            if names:
+                return ", ".join(names)
 
     return ""
 
@@ -471,10 +568,6 @@ def choose_best_author(meta_author: str, guessed_author: str) -> str:
 
     return guessed_author or meta_author
 
-
-# ---------------------------------------------------------------------------
-#  READ / WRITE
-# ---------------------------------------------------------------------------
 
 def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
     stat = pdf_path.stat()
@@ -503,6 +596,7 @@ def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
         meta_title = meta_get(meta, "title", "/Title")
         meta_author = meta_get(meta, "author", "/Author")
         rec.subject = meta_get(meta, "subject", "/Subject")
+        rec.notes = meta_get(meta, "bennet_notes", "/BennetNotes")
 
         rec.title = meta_title or pdf_path.stem
 
@@ -519,10 +613,8 @@ def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
                 pass
         rec.content = "\n".join(parts)
 
-        # Year detection
         rec.year = extract_year(meta, pdf_path, first_page_text or rec.content)
 
-        # Author detection
         guessed_author = guess_author_from_first_page(first_page_text, rec.title)
         rec.author = choose_best_author(meta_author, guessed_author)
 
@@ -548,7 +640,7 @@ def _year_to_pdf_date(year: str) -> Optional[str]:
 
 
 def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
-                       year: str = "") -> None:
+                       year: str = "", notes: str = "") -> None:
     pdf = Path(pdf_path)
     tmp_path: Optional[Path] = None
 
@@ -574,6 +666,7 @@ def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
             "/Title": title,
             "/Author": author,
             "/Subject": subject,
+            "/BennetNotes": notes,
         })
 
         clean_year = parse_year_from_date_string(year)
@@ -582,6 +675,8 @@ def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
             pdf_date = _year_to_pdf_date(clean_year)
             if pdf_date:
                 existing["/CreationDate"] = pdf_date
+        else:
+            existing.pop("/Year", None)
 
         writer.add_metadata(existing)
 
@@ -600,10 +695,6 @@ def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
         raise
 
 
-# ---------------------------------------------------------------------------
-#  CACHE TRUST CHECK
-# ---------------------------------------------------------------------------
-
 def cached_record_is_trustworthy(cached: Dict[str, Any], stat) -> bool:
     if not cached:
         return False
@@ -611,9 +702,9 @@ def cached_record_is_trustworthy(cached: Dict[str, Any], stat) -> bool:
         return False
     author = safe_str(cached.get("author", ""))
     year = safe_str(cached.get("year", ""))
-    if not author or not year:
+    if not year:
         return False
-    if is_all_caps_heading(author):
+    if author and is_all_caps_heading(author):
         return False
     if not YEAR_RE.fullmatch(year):
         return False
@@ -710,7 +801,7 @@ class BennetPDFManager(QMainWindow):
         self.dir_label.setStyleSheet("color:#555;")
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search (title, author, subject, contents)…")
+        self.search_box.setPlaceholderText("Search (title, author, subject, notes, contents)…")
         self.search_box.textChanged.connect(self.apply_filters)
 
         choose_btn = QPushButton("Choose Home…")
@@ -737,8 +828,10 @@ class BennetPDFManager(QMainWindow):
         self.folder_tree.itemSelectionChanged.connect(self.apply_filters)
         splitter.addWidget(self.folder_tree)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["Title", "Author", "Date", "Paper/Subject", "Folder", "File", "Match"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels([
+            "Title", "Author", "Date", "Paper/Subject", "Folder", "File", "Match", "Notes"
+        ])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -763,6 +856,7 @@ class BennetPDFManager(QMainWindow):
         self.table.setColumnWidth(4, 150)
         self.table.setColumnWidth(5, 180)
         self.table.setColumnWidth(6, 120)
+        self.table.setColumnWidth(7, 250)
 
         hdr.sortIndicatorChanged.connect(self.on_sort_changed)
         splitter.addWidget(self.table)
@@ -779,10 +873,16 @@ class BennetPDFManager(QMainWindow):
         self.year_edit = QLineEdit()
         self.year_edit.setPlaceholderText("e.g. 2016")
         self.year_edit.setMaxLength(4)
+
+        self.notes_edit = QTextEdit()
+        self.notes_edit.setPlaceholderText("Notes for this PDF...")
+        self.notes_edit.setMaximumHeight(100)
+
         form.addRow("Title:", self.title_edit)
         form.addRow("Author:", self.author_edit)
         form.addRow("Paper/Subject:", self.subject_edit)
         form.addRow("Date (year):", self.year_edit)
+        form.addRow("Notes:", self.notes_edit)
         right_l.addLayout(form)
 
         btn_row = QHBoxLayout()
@@ -897,7 +997,7 @@ class BennetPDFManager(QMainWindow):
             try:
                 records = self.read_cache_records()
                 if records:
-                    self.records = [PDFRecord(**r) for r in records]
+                    self.records = [record_from_dict(r) for r in records]
                     self.populate_folders()
                     self.apply_filters()
                     self.status.showMessage(
@@ -959,7 +1059,7 @@ class BennetPDFManager(QMainWindow):
     def on_scan_done(self, records_as_dicts: List[Dict[str, Any]]):
         self.progress.setVisible(False)
         self.save_cache(records_as_dicts)
-        self.records = [PDFRecord(**r) for r in records_as_dicts]
+        self.records = [record_from_dict(r) for r in records_as_dicts]
         self.populate_folders()
         self.apply_filters()
         self.status.showMessage(f"Indexed {len(self.records)} PDFs.", 6000)
@@ -970,18 +1070,29 @@ class BennetPDFManager(QMainWindow):
 
     def populate_folders(self):
         self.folder_tree.clear()
+
         root = QTreeWidgetItem([f"All ({len(self.records)})"])
-        root.setData(0, Qt.ItemDataRole.UserRole, None)
+        root.setData(0, Qt.ItemDataRole.UserRole, {"type": "all"})
         self.folder_tree.addTopLevelItem(root)
 
-        counts: Dict[str, int] = {}
+        by_subdir: Dict[str, List[PDFRecord]] = {}
         for r in self.records:
-            counts[r.subdir] = counts.get(r.subdir, 0) + 1
+            by_subdir.setdefault(r.subdir, []).append(r)
 
-        for sd in sorted(counts, key=lambda s: s.lower()):
-            it = QTreeWidgetItem([f"{sd} ({counts[sd]})"])
-            it.setData(0, Qt.ItemDataRole.UserRole, sd)
-            root.addChild(it)
+        for sd in sorted(by_subdir, key=lambda s: s.lower()):
+            records = sorted(by_subdir[sd], key=lambda r: r.display_title.lower())
+
+            folder_item = QTreeWidgetItem([f"{sd} ({len(records)})"])
+            folder_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "subdir": sd})
+            root.addChild(folder_item)
+
+            for r in records:
+                file_item = QTreeWidgetItem([r.display_title])
+                file_item.setToolTip(0, r.path)
+                file_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "file", "subdir": sd, "path": r.path})
+                folder_item.addChild(file_item)
+
+            folder_item.setExpanded(False)
 
         root.setExpanded(True)
         self.folder_tree.setCurrentItem(root)
@@ -990,7 +1101,21 @@ class BennetPDFManager(QMainWindow):
         item = self.folder_tree.currentItem()
         if not item:
             return None
-        return item.data(0, Qt.ItemDataRole.UserRole)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return None
+        if data.get("type") in ("folder", "file"):
+            return data.get("subdir")
+        return None
+
+    def current_file_path(self) -> Optional[str]:
+        item = self.folder_tree.currentItem()
+        if not item:
+            return None
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(data, dict) and data.get("type") == "file":
+            return data.get("path")
+        return None
 
     def score(self, r: PDFRecord, q: str) -> Tuple[int, str]:
         q = q.lower()
@@ -1012,6 +1137,9 @@ class BennetPDFManager(QMainWindow):
         if q in (r.filename or "").lower():
             score = max(score, 175)
             labels.append("File")
+        if q in (r.notes or "").lower():
+            score = max(score, 180)
+            labels.append("Notes")
         if q in (r.content or "").lower():
             score = max(score, 100)
             labels.append("Contents")
@@ -1023,6 +1151,7 @@ class BennetPDFManager(QMainWindow):
 
     def apply_filters(self):
         folder = self.current_folder()
+        selected_file_path = self.current_file_path()
         q = self.search_box.text().strip()
 
         selected_path = self.current.path if self.current else None
@@ -1032,6 +1161,8 @@ class BennetPDFManager(QMainWindow):
 
         scored: List[Tuple[int, str, PDFRecord]] = []
         for r in self.records:
+            if selected_file_path is not None and r.path != selected_file_path:
+                continue
             if folder is not None and r.subdir != folder:
                 continue
             if not q:
@@ -1054,7 +1185,9 @@ class BennetPDFManager(QMainWindow):
         self.table.sortItems(sort_section, sort_order)
         self.table.horizontalHeader().setSortIndicator(sort_section, sort_order)
 
-        if selected_path:
+        if selected_file_path:
+            self.select_record_by_path(selected_file_path)
+        elif selected_path:
             self.select_record_by_path(selected_path)
 
         if q:
@@ -1070,7 +1203,16 @@ class BennetPDFManager(QMainWindow):
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            cols = [r.display_title, r.author, r.year, r.subject, r.subdir, r.filename, labels.get(r.path, "")]
+            cols = [
+                r.display_title,
+                r.author,
+                r.year,
+                r.subject,
+                r.subdir,
+                r.filename,
+                labels.get(r.path, ""),
+                r.notes,
+            ]
             for c, val in enumerate(cols):
                 item = QTableWidgetItem(val)
                 item.setData(Qt.ItemDataRole.UserRole, r.path)
@@ -1109,6 +1251,7 @@ class BennetPDFManager(QMainWindow):
         self.author_edit.setText(r.author)
         self.subject_edit.setText(r.subject)
         self.year_edit.setText(r.year)
+        self.notes_edit.setPlainText(r.notes)
         self.path_label.setText(r.path)
         self.preview.setPlainText((r.content or "")[:12000])
 
@@ -1126,6 +1269,7 @@ class BennetPDFManager(QMainWindow):
         self.author_edit.clear()
         self.subject_edit.clear()
         self.year_edit.clear()
+        self.notes_edit.clear()
         self.path_label.clear()
         self.preview.clear()
         self.save_btn.setEnabled(False)
@@ -1164,6 +1308,7 @@ class BennetPDFManager(QMainWindow):
         new_author = self.author_edit.text().strip()
         new_subject = self.subject_edit.text().strip()
         new_year = self.year_edit.text().strip()
+        new_notes = self.notes_edit.toPlainText().strip()
 
         if new_year and not YEAR_RE.fullmatch(new_year):
             QMessageBox.warning(self, "Invalid year",
@@ -1171,13 +1316,16 @@ class BennetPDFManager(QMainWindow):
             return
 
         try:
-            write_pdf_metadata(r.path, new_title, new_author, new_subject, new_year)
+            write_pdf_metadata(r.path, new_title, new_author, new_subject, new_year, new_notes)
 
             r.title = new_title or p.stem
             r.author = new_author
             r.subject = new_subject
+            r.notes = new_notes
             if new_year:
                 r.year = new_year
+            else:
+                r.year = ""
             st = p.stat()
             r.mtime = st.st_mtime
             r.size = st.st_size
