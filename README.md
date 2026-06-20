@@ -1,2 +1,2 @@
-# bennet
-Bennet PDF Library Manager
+# Bennet PDF Library Manager
+Bennet PDF Library Manager is a local library manager for keeping track of PDF files within a home directory and its subdirectories. It scrubs PDF files and auto-detects metadata like title, date published, and authors. Since it is locally hosted, Bennet has no upload features but simultaneously, no library size restrictions though it is optimized to work with <1000 pdf files. 
