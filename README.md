@@ -13,7 +13,20 @@ Inspired by the sacred knowledge trove of Mr.Bennet's library from Jane Austin's
 - Text preview of the first few pages of each PDF.
 - Open PDFs in the system default viewer or reveal them in the file manager.
 
-## Requirements
+## Usage
+
+Within bin/dist you can find a pre-compiled Bennet.exe. If you are running 64-bit Windows, it should just work. Otherwise, you can run the Python or build the executable yourself with the instructions provided below.
+
+On first launch, click **"Choose Home…"** to select the directory that contains your PDFs. Bennet will index all PDFs under that directory and build a searchable table of records. You can:
+
+- Filter the list by typing into the search box.
+- Click a row to view and edit metadata.
+- Click **Save** to write updated metadata back into the PDF.
+- Double-click a row or use the context menu to open the PDF or show it in your file manager.
+
+## Python Usage
+
+Requirements:
 
 - Python 3.9+
 - [PyQt6](https://pypi.org/project/PyQt6/)
@@ -25,22 +38,11 @@ Install dependencies:
 pip install PyQt6 pypdf
 ```
 
-## Usage
-
-Within bin/dist you can find a pre-compiled Bennet.exe. If you are running 64-bit Windows, it should just work. Otherwise, you can run the Python or build the executable yourself with the instructions provided below.
-
-Run the application directly:
+Running the application
 
 ```bash
 python bennet.py
 ```
-
-On first launch, click **"Choose Home…"** to select the directory that contains your PDFs. Bennet will index all PDFs under that directory and build a searchable table of records. You can:
-
-- Filter the list by typing into the search box.
-- Click a row to view and edit metadata.
-- Click **Save** to write updated metadata back into the PDF.
-- Double-click a row or use the context menu to open the PDF or show it in your file manager.
 
 ## Building a Windows executable
 
