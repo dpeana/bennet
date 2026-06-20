@@ -13,7 +13,7 @@ Inspired by the sacred knowledge trove of Mr.Bennet's library from Jane Austin's
 - Text preview of the first few pages of each PDF.
 - Open PDFs in the system default viewer or reveal them in the file manager.
 
-## Usage
+## Quick Start
 
 Within bin/dist you can find a pre-compiled Bennet.exe. If you are running 64-bit Windows, it should just work. Otherwise, you can run the Python or build the executable yourself with the instructions provided below.
 
