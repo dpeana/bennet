@@ -1,8 +1,9 @@
 # To build an .exe from this, run this from the directory you want it built in:
-#   python -m PyInstaller --name "Bennet" --windowed --onefile bennet.py
+# python -m PyInstaller --clean --noupx --name "Bennet" --windowed --onefile --icon=icon.ico --add-data "icon.ico;." ../bennet.py
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu,
@@ -41,6 +42,17 @@ SORT_SECTION_KEY = "table/sort_section"
 SORT_ORDER_KEY = "table/sort_order"
 YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 CURRENT_YEAR = datetime.now().year
+
+
+def resource_path(relative_path: str) -> str:
+    """
+    Return an absolute path to a bundled resource.
+
+    Works both in development and in a PyInstaller one-file build.
+    """
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath(os.path.dirname(__file__)), relative_path)
 
 
 @dataclass
@@ -74,7 +86,7 @@ def record_from_dict(d: Dict[str, Any]) -> PDFRecord:
     """
     Reconstruct a PDFRecord from a decoded JSON dict, discarding unknown keys.
 
-    Ensures forward‑compatibility with older cache files that might contain
+    Ensures forward-compatibility with older cache files that might contain
     extra fields.
     """
     allowed = {f.name for f in PDFRecord.__dataclass_fields__.values()}
@@ -146,7 +158,7 @@ def normalize_whitespace(text: str) -> str:
 
 def parse_year_from_date_string(text: str) -> str:
     """
-    Extract a plausible 4‑digit year from an arbitrary date string.
+    Extract a plausible 4-digit year from an arbitrary date string.
 
     Returns an empty string if no year is found.
     """
@@ -196,7 +208,6 @@ def extract_year_from_text(text: str) -> str:
     if not text:
         return ""
 
-    # Prefer explicit publication/copyright patterns.
     priority_patterns = [
         r"\bpublished\s+(?:online\s+)?(?:on\s+)?(?:\w+\.?\s+\d{1,2},?\s+)?((?:19|20)\d{2})\b",
         r"\baccepted\s+(?:\w+\.?\s+\d{1,2},?\s+)?((?:19|20)\d{2})\b",
@@ -210,7 +221,6 @@ def extract_year_from_text(text: str) -> str:
             if _plausible_year(y):
                 return str(y)
 
-    # Look for explicit month + year patterns (often in headers).
     months = (
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
         r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
@@ -225,10 +235,8 @@ def extract_year_from_text(text: str) -> str:
         candidates = [int(m.group(1)) for m in pat.finditer(text)]
         candidates = [y for y in candidates if _plausible_year(y)]
         if candidates:
-            # Prefer years that appear more often; break ties in favor of older.
             return str(min(candidates, key=lambda y: (-candidates.count(y), y)))
 
-    # Ignore references section when scanning for a "typical" year.
     lines = text.splitlines()
     search_text = ""
     for line in lines:
@@ -240,7 +248,6 @@ def extract_year_from_text(text: str) -> str:
     all_years = [int(m.group(0)) for m in YEAR_RE.finditer(search_text)]
     all_years = [y for y in all_years if _plausible_year(y)]
     if all_years:
-        # Pick the most frequent plausible year (common heuristic for publication year).
         return str(max(set(all_years), key=lambda y: (all_years.count(y), y)))
 
     return ""
@@ -248,7 +255,7 @@ def extract_year_from_text(text: str) -> str:
 
 def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
     """
-    Extract a best‑guess publication year using PDF metadata and text.
+    Extract a best-guess publication year using PDF metadata and text.
 
     Order:
     1. Explicit /Year entry in metadata.
@@ -269,7 +276,6 @@ def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
         return text_year
 
     candidates: List[str] = []
-    # pypdf's metadata may expose datetime-ish attributes.
     for attr in ("creation_date", "modification_date"):
         try:
             value = getattr(meta, attr, None)
@@ -280,6 +286,7 @@ def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
                     candidates.append(str(value))
         except Exception:
             pass
+
     for key in ("/CreationDate", "/ModDate"):
         try:
             if meta is not None and hasattr(meta, "get"):
@@ -288,13 +295,13 @@ def extract_year(meta, pdf_path: Path, first_page_text: str = "") -> str:
                     candidates.append(str(raw))
         except Exception:
             pass
+
     for candidate in candidates:
         y = parse_year_from_date_string(candidate)
         if y and _plausible_year(int(y)):
             return y
 
     try:
-        # Fallback to filesystem mtime as a last resort.
         y = datetime.fromtimestamp(pdf_path.stat().st_mtime).year
         if _plausible_year(y):
             return str(y)
@@ -325,7 +332,7 @@ AUTHOR_NAME_BAD_WORDS = {
 
 def is_all_caps_heading(text: str) -> bool:
     """
-    Return True if text looks like an all‑caps heading (not an author line).
+    Return True if text looks like an all-caps heading (not an author line).
 
     Used to avoid misclassifying section headings as author names.
     """
@@ -360,36 +367,27 @@ def _is_name_token(raw: str) -> bool:
 def extract_author_names_from_text(text: str) -> List[str]:
     """
     Extract plausible author names from arbitrary text using heuristics.
-
-    This function:
-    * Strips emails, URLs, DOIs, and affiliation markers.
-    * Looks for name‑like sequences with uppercase initials.
-    * Filters out known non‑name phrases and institution terms.
     """
     text = normalize_whitespace(text)
     if not text:
         return []
 
-    # Strip explicit 'Author(s):' labels and noisy tokens.
     text = re.sub(r"(?i)\bauthors?\s*:\s*", " ", text)
     text = re.sub(r"\S+@\S+", " ", text)
     text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"www\.\S+", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\bdoi\s*:\s*\S+", " ", text, flags=re.IGNORECASE)
 
-    # Remove reference superscript indices and similar numeric markers near commas.
     text = re.sub(
         r"\s*,\s*\d+(?:\s*,\s*\d+)*(?:\s*[\*\†\‡\§\¶#]+)*",
         ", ",
         text,
     )
-
     text = re.sub(
         r"\s+\d+(?:\s*,\s*\d+)*(?:\s*[\*\†\‡\§\¶#]+)*(?=\s+[A-Z])",
         ", ",
         text,
     )
-
     text = re.sub(
         r"\s+\d+(?:\s*,\s*\d+)*(?:\s*[\*\†\‡\§\¶#]+)*\s*$",
         " ",
@@ -447,9 +445,6 @@ def extract_author_names_from_text(text: str) -> List[str]:
 def clean_author_text(text: str) -> str:
     """
     Normalize an author string into 'Name, Name, ...' form when possible.
-
-    If no plausible names can be extracted, fall back to a cleaned version
-    of the original text.
     """
     names = extract_author_names_from_text(text)
     if names:
@@ -489,8 +484,6 @@ def is_affiliation_line(line: str) -> bool:
 def is_body_text_line(line: str) -> bool:
     """
     Return True if a line looks like narrative body text, not authors.
-
-    Used to decide when to stop scanning for author lines.
     """
     lower = normalize_whitespace(line).lower()
     words = lower.split()
@@ -574,24 +567,16 @@ def looks_like_author_line(line: str) -> bool:
 def guess_author_from_first_page(first_page_text: str, title: str) -> str:
     """
     Guess author names from the first page of a PDF.
-
-    Strategy:
-    * Check for explicit 'Authors:' line.
-    * Look immediately below the title.
-    * Scan early lines until affiliation/body text is reached.
-    * As a last resort, use lines immediately above the first affiliation line.
     """
     if not first_page_text:
         return ""
 
-    # Explicit "Authors: ..." line.
     m = re.search(r"(?im)^\s*authors?\s*:\s*(.+)$", first_page_text)
     if m:
         names = extract_author_names_from_text(m.group(1))
         if names:
             return ", ".join(names)
 
-    # Normalize lines and drop empties.
     lines = [normalize_whitespace(l) for l in first_page_text.splitlines()]
     lines = [l for l in lines if l]
     if not lines:
@@ -600,11 +585,6 @@ def guess_author_from_first_page(first_page_text: str, title: str) -> str:
     title_norm = normalize_whitespace(title).lower()
 
     def collect_from_index(start_i: int) -> str:
-        """
-        Collect consecutive author‑ish lines starting at start_i.
-
-        Stops when hitting affiliation, metadata, or clear body text.
-        """
         collected: List[str] = []
 
         for line in lines[start_i:start_i + 12]:
@@ -630,21 +610,17 @@ def guess_author_from_first_page(first_page_text: str, title: str) -> str:
         names = extract_author_names_from_text(" ".join(collected))
         return ", ".join(names) if names else ""
 
-    # Try lines immediately after the title.
     if title_norm:
         for i, line in enumerate(lines[:35]):
             ln = line.lower()
-
             if ln == title_norm or (
-                len(title_norm) > 15
-                and (ln in title_norm or title_norm in ln)
+                len(title_norm) > 15 and (ln in title_norm or title_norm in ln)
             ):
                 found = collect_from_index(i + 1)
                 if found:
                     return found
                 break
 
-    # Then scan for any plausible author line near the top.
     for i, line in enumerate(lines[:25]):
         if is_all_caps_heading(line):
             continue
@@ -660,7 +636,6 @@ def guess_author_from_first_page(first_page_text: str, title: str) -> str:
             if found:
                 return found
 
-    # Finally, look immediately above the first affiliation block.
     first_affiliation_idx = None
     for i, line in enumerate(lines[:40]):
         if is_affiliation_line(line):
@@ -692,9 +667,6 @@ def guess_author_from_first_page(first_page_text: str, title: str) -> str:
 def choose_best_author(meta_author: str, guessed_author: str) -> str:
     """
     Decide between the metadata author field and a guessed author from text.
-
-    Rejects obviously bogus metadata authors (e.g. 'Microsoft Word') and prefers
-    the variant with more distinct names when both look reasonable.
     """
     meta_author = clean_author_text(meta_author)
     guessed_author = clean_author_text(guessed_author)
@@ -713,7 +685,6 @@ def choose_best_author(meta_author: str, guessed_author: str) -> str:
     if meta_ok:
         meta_names = meta_author.count(",") + 1
         guess_names = guessed_author.count(",") + 1 if guessed_author else 0
-        # If guess includes significantly more names, prefer it.
         if guess_names > meta_names + 1:
             return guessed_author
         return meta_author
@@ -724,9 +695,6 @@ def choose_best_author(meta_author: str, guessed_author: str) -> str:
 def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
     """
     Read a PDF file, extract metadata and a text preview, and return a PDFRecord.
-
-    Handles encrypted PDFs gracefully and records any read errors instead of
-    raising them to the caller.
     """
     stat = pdf_path.stat()
     rec = PDFRecord(
@@ -742,7 +710,6 @@ def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
 
         if reader.is_encrypted:
             try:
-                # Try empty password; many PDFs are only lightly protected.
                 reader.decrypt("")
             except Exception:
                 rec.read_error = "Encrypted PDF"
@@ -761,7 +728,6 @@ def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
 
         parts: List[str] = []
         first_page_text = ""
-        # Only read a limited number of pages, both for speed and cache size.
         for idx, page in enumerate(reader.pages[: min(len(reader.pages), CONTENT_PAGE_LIMIT)]):
             try:
                 t = page.extract_text() or ""
@@ -770,7 +736,6 @@ def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
                 if t:
                     parts.append(t)
             except Exception:
-                # Ignore extraction errors on individual pages.
                 pass
         rec.content = "\n".join(parts)
 
@@ -796,8 +761,6 @@ def read_pdf_record(pdf_path: Path, home_dir: Path) -> PDFRecord:
 def _year_to_pdf_date(year: str) -> Optional[str]:
     """
     Convert a plain year string into a PDF date string (D:YYYY0101000000).
-
-    Returns None if the year is not valid.
     """
     y = parse_year_from_date_string(year)
     if not y:
@@ -805,13 +768,16 @@ def _year_to_pdf_date(year: str) -> Optional[str]:
     return f"D:{y}0101000000"
 
 
-def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
-                       year: str = "", notes: str = "") -> None:
+def write_pdf_metadata(
+    pdf_path: str,
+    title: str,
+    author: str,
+    subject: str,
+    year: str = "",
+    notes: str = "",
+) -> None:
     """
     Rewrite a PDF file's metadata in place.
-
-    Uses a temporary file in the same directory and swaps it into place on success.
-    Raises if the file cannot be read or written safely.
     """
     pdf = Path(pdf_path)
     tmp_path: Optional[Path] = None
@@ -830,7 +796,6 @@ def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
 
         existing: Dict[str, Any] = {}
         if reader.metadata:
-            # Copy existing metadata so that we do not lose unrelated fields.
             for k, v in dict(reader.metadata).items():
                 if v is not None:
                     existing[str(k)] = str(v)
@@ -849,12 +814,10 @@ def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
             if pdf_date:
                 existing["/CreationDate"] = pdf_date
         else:
-            # If year is cleared, remove the /Year entry if present.
             existing.pop("/Year", None)
 
         writer.add_metadata(existing)
 
-        # Write to a temp file in the same directory to avoid cross‑volume issues.
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False, dir=str(pdf.parent)) as tmp:
             tmp_path = Path(tmp.name)
             writer.write(tmp)
@@ -872,9 +835,7 @@ def write_pdf_metadata(pdf_path: str, title: str, author: str, subject: str,
 
 def cached_record_is_trustworthy(cached: Dict[str, Any], stat) -> bool:
     """
-    Decide whether a cached record still matches the on‑disk file.
-
-    Requires mtime and size to match and basic sanity checks on author/year.
+    Decide whether a cached record still matches the on-disk file.
     """
     if not cached:
         return False
@@ -894,42 +855,27 @@ def cached_record_is_trustworthy(cached: Dict[str, Any], stat) -> bool:
 class ScanWorker(QThread):
     """
     Background worker that scans the home directory for PDFs and builds records.
-
-    Emits progress updates and either a completed list of records or an error.
     """
 
-    progress = pyqtSignal(int, int, str)  # current index, total, path
-    finished_ok = pyqtSignal(list)        # list of record dicts
-    failed = pyqtSignal(str)             # error message (with traceback)
+    progress = pyqtSignal(int, int, str)
+    finished_ok = pyqtSignal(list)
+    failed = pyqtSignal(str)
 
     def __init__(self, home_dir: str, cache_records: List[Dict[str, Any]]):
-        """
-        Initialize the worker with a home directory and a list of cached records.
-        """
         super().__init__()
         self.home_dir = Path(home_dir)
-        # Path → cached record dict for quick lookups.
         self.cache_by_path = {r.get("path"): r for r in cache_records if isinstance(r, dict)}
         self._cancelled = False
 
     def cancel(self) -> None:
-        """
-        Request cancellation of a running scan.
-        """
         self._cancelled = True
 
     def run(self) -> None:
-        """
-        Main worker entry point: walk the directory tree and index every PDF.
-
-        On success, emits finished_ok(list_of_record_dicts); on error, emits failed().
-        """
         try:
             pdf_paths: List[Path] = []
             for root, dirs, files in os.walk(self.home_dir):
                 if self._cancelled:
                     return
-                # Skip version control / cache directories.
                 dirs[:] = [d for d in dirs if d not in {"__pycache__", ".git", ".svn", ".hg"}]
                 root_p = Path(root)
                 for fn in files:
@@ -944,7 +890,7 @@ class ScanWorker(QThread):
             for i, p in enumerate(pdf_paths, start=1):
                 if self._cancelled:
                     return
-                # Progress: which file we're working on.
+
                 self.progress.emit(i, total, str(p))
 
                 try:
@@ -954,7 +900,6 @@ class ScanWorker(QThread):
 
                 cached = self.cache_by_path.get(str(p))
                 if cached_record_is_trustworthy(cached, stat):
-                    # Reuse cached record when file hasn't changed.
                     out.append(cached)
                     continue
 
@@ -964,23 +909,15 @@ class ScanWorker(QThread):
             self.finished_ok.emit(out)
 
         except Exception as e:
-            # Include traceback in error signal for easier debugging.
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
 
 
 class BennetPDFManager(QMainWindow):
     """
     Main window for the Bennet PDF Manager application.
-
-    Provides:
-    * Folder tree of the home directory.
-    * Searchable, sortable table of PDFs.
-    * Metadata editor for title/author/subject/year/notes.
-    * Text preview for the first few pages.
     """
 
     def __init__(self):
-        """Initialize the main window, restore saved state, and kick off initial scan."""
         super().__init__()
         self.setWindowTitle("Bennet PDF Manager")
         self.resize(1450, 820)
@@ -1005,14 +942,10 @@ class BennetPDFManager(QMainWindow):
             self.status.showMessage("Choose a home directory to begin.")
 
     def _build_ui(self):
-        """
-        Construct all widgets, layouts, and menus for the main window.
-        """
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
 
-        # Top toolbar row: home folder, search box, and scan controls.
         top = QHBoxLayout()
         self.dir_label = QLabel("Home: (not set)")
         self.dir_label.setStyleSheet("color:#555;")
@@ -1040,13 +973,11 @@ class BennetPDFManager(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left: folder tree view.
         self.folder_tree = QTreeWidget()
         self.folder_tree.setHeaderLabel("Folders")
         self.folder_tree.itemSelectionChanged.connect(self.apply_filters)
         splitter.addWidget(self.folder_tree)
 
-        # Center: main table of PDFs.
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels([
             "Title", "Author", "Date", "Paper/Subject", "Folder", "File", "Match", "Notes"
@@ -1068,7 +999,6 @@ class BennetPDFManager(QMainWindow):
         for i in range(self.table.columnCount()):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
 
-        # Tuned column widths for readability.
         self.table.setColumnWidth(0, 300)
         self.table.setColumnWidth(1, 260)
         self.table.setColumnWidth(2, 80)
@@ -1081,11 +1011,10 @@ class BennetPDFManager(QMainWindow):
         hdr.sortIndicatorChanged.connect(self.on_sort_changed)
         splitter.addWidget(self.table)
 
-        # Right: metadata editor + preview.
         right = QWidget()
         right_l = QVBoxLayout(right)
 
-        right_l.addWidget(QLabel("<b>Metadata</b>"))
+        right_l.addWidget(QLabel("Metadata"))
 
         form = QFormLayout()
         self.title_edit = QLineEdit()
@@ -1119,13 +1048,13 @@ class BennetPDFManager(QMainWindow):
         btn_row.addWidget(self.open_btn)
         right_l.addLayout(btn_row)
 
-        right_l.addWidget(QLabel("<b>Path</b>"))
+        right_l.addWidget(QLabel("Path"))
         self.path_label = QLabel("")
         self.path_label.setWordWrap(True)
         self.path_label.setStyleSheet("color:#666; font-size:11px;")
         right_l.addWidget(self.path_label)
 
-        right_l.addWidget(QLabel(f"<b>Indexed text preview</b> (first {CONTENT_PAGE_LIMIT} page(s))"))
+        right_l.addWidget(QLabel(f"Indexed text preview (first {CONTENT_PAGE_LIMIT} page(s))"))
         self.preview = QTextEdit()
         self.preview.setReadOnly(True)
         right_l.addWidget(self.preview, 1)
@@ -1139,7 +1068,6 @@ class BennetPDFManager(QMainWindow):
 
         outer.addWidget(splitter, 1)
 
-        # Status bar with progress indicator.
         self.status = QStatusBar()
         self.setStatusBar(self.status)
 
@@ -1148,7 +1076,6 @@ class BennetPDFManager(QMainWindow):
         self.progress.setVisible(False)
         self.status.addPermanentWidget(self.progress)
 
-        # File menu entries.
         m = self.menuBar().addMenu("&File")
         a_choose = QAction("Choose Home…", self)
         a_choose.triggered.connect(self.choose_home)
@@ -1164,19 +1091,11 @@ class BennetPDFManager(QMainWindow):
         m.addAction(a_exit)
 
     def cache_path(self) -> Optional[Path]:
-        """
-        Return the path to the cache file for the current home directory.
-
-        Returns None if no home directory is configured.
-        """
         if not self.home_dir:
             return None
         return Path(self.home_dir) / CACHE_FILENAME
 
     def restore_ui_state(self):
-        """
-        Restore window geometry, splitter states, and table header configuration.
-        """
         geometry = self.settings.value(WINDOW_GEOMETRY_KEY)
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -1196,9 +1115,6 @@ class BennetPDFManager(QMainWindow):
         self.table.horizontalHeader().setSortIndicator(sort_section, sort_order)
 
     def save_ui_state(self):
-        """
-        Persist window geometry, window state, and table header configuration.
-        """
         self.settings.setValue(WINDOW_GEOMETRY_KEY, self.saveGeometry())
         self.settings.setValue(WINDOW_STATE_KEY, self.saveState())
         self.settings.setValue(HEADER_STATE_KEY, self.table.horizontalHeader().saveState())
@@ -1208,11 +1124,6 @@ class BennetPDFManager(QMainWindow):
         self.settings.setValue(SORT_ORDER_KEY, int(hdr.sortIndicatorOrder().value))
 
     def read_cache_records(self) -> List[Dict[str, Any]]:
-        """
-        Read cached records from disk if present and schema‑compatible.
-
-        Returns a list of raw dicts; conversion to PDFRecord is done elsewhere.
-        """
         cache = self.cache_path()
         if not cache or not cache.exists():
             return []
@@ -1231,11 +1142,6 @@ class BennetPDFManager(QMainWindow):
         return [r for r in records if isinstance(r, dict)]
 
     def load_cache_or_scan(self):
-        """
-        Load records from cache if available; otherwise start a fresh scan.
-
-        If cache loading fails, falls back to a full rescan.
-        """
         cache = self.cache_path()
         if cache and cache.exists():
             try:
@@ -1253,9 +1159,6 @@ class BennetPDFManager(QMainWindow):
         self.rescan()
 
     def save_cache(self, records_as_dicts: List[Dict[str, Any]]):
-        """
-        Write the current list of records to the cache file for the home directory.
-        """
         cache = self.cache_path()
         if not cache:
             return
@@ -1267,9 +1170,6 @@ class BennetPDFManager(QMainWindow):
         cache.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def choose_home(self):
-        """
-        Prompt the user to choose a home directory and trigger a rescan.
-        """
         start = self.home_dir or str(Path.home())
         folder = QFileDialog.getExistingDirectory(self, "Choose PDF Home Directory", start)
         if not folder:
@@ -1280,16 +1180,10 @@ class BennetPDFManager(QMainWindow):
         self.rescan()
 
     def rescan(self):
-        """
-        Start a background rescan of the home directory.
-
-        Will also prompt to set a home directory if one is not configured yet.
-        """
         if not self.home_dir:
             self.choose_home()
             return
         if self.worker and self.worker.isRunning():
-            # Avoid starting overlapping scans.
             return
 
         cache_records = self.read_cache_records()
@@ -1309,17 +1203,11 @@ class BennetPDFManager(QMainWindow):
         self.worker.start()
 
     def on_scan_progress(self, i: int, total: int, path: str):
-        """
-        Update the progress bar and status message while scanning.
-        """
         self.progress.setMaximum(max(total, 1))
         self.progress.setValue(i)
         self.status.showMessage(f"[{i}/{total}] {path}")
 
     def on_scan_done(self, records_as_dicts: List[Dict[str, Any]]):
-        """
-        Handle successful completion of a scan by refreshing UI and cache.
-        """
         self.progress.setVisible(False)
         self.save_cache(records_as_dicts)
         self.records = [record_from_dict(r) for r in records_as_dicts]
@@ -1328,16 +1216,10 @@ class BennetPDFManager(QMainWindow):
         self.status.showMessage(f"Indexed {len(self.records)} PDFs.", 6000)
 
     def on_scan_failed(self, msg: str):
-        """
-        Show an error dialog when the background scan fails.
-        """
         self.progress.setVisible(False)
         QMessageBox.critical(self, "Indexing failed", msg)
 
     def populate_folders(self):
-        """
-        Rebuild the folder tree based on the current list of records.
-        """
         self.folder_tree.clear()
 
         root = QTreeWidgetItem([f"All ({len(self.records)})"])
@@ -1369,9 +1251,6 @@ class BennetPDFManager(QMainWindow):
         self.folder_tree.setCurrentItem(root)
 
     def current_folder(self) -> Optional[str]:
-        """
-        Return the currently selected subfolder label, or None for 'All'.
-        """
         item = self.folder_tree.currentItem()
         if not item:
             return None
@@ -1383,9 +1262,6 @@ class BennetPDFManager(QMainWindow):
         return None
 
     def current_file_path(self) -> Optional[str]:
-        """
-        Return the file path associated with the currently selected tree node, if any.
-        """
         item = self.folder_tree.currentItem()
         if not item:
             return None
@@ -1395,12 +1271,6 @@ class BennetPDFManager(QMainWindow):
         return None
 
     def score(self, r: PDFRecord, q: str) -> Tuple[int, str]:
-        """
-        Compute a relevance score for record r given a query q.
-
-        Higher scores indicate better matches; also returns a label describing
-        where q matched (Title, Author, etc.).
-        """
         q = q.lower()
         labels: List[str] = []
         score = 0
@@ -1428,17 +1298,11 @@ class BennetPDFManager(QMainWindow):
             labels.append("Contents")
 
         if labels:
-            # Small boost for matching multiple fields.
             score += len(labels)
 
         return score, ", ".join(labels)
 
     def apply_filters(self):
-        """
-        Apply the active folder and search filters to the list of records.
-
-        Also preserves the current selection and sort order when possible.
-        """
         folder = self.current_folder()
         selected_file_path = self.current_file_path()
         q = self.search_box.text().strip()
@@ -1470,12 +1334,10 @@ class BennetPDFManager(QMainWindow):
         labels = {r.path: lab for _, lab, r in scored}
         self.populate_table(labels)
 
-        # Restore previous sort and header state.
         self.table.horizontalHeader().restoreState(header_state)
         self.table.sortItems(sort_section, sort_order)
         self.table.horizontalHeader().setSortIndicator(sort_section, sort_order)
 
-        # Try to keep the same record selected when filters change.
         if selected_file_path:
             self.select_record_by_path(selected_file_path)
         elif selected_path:
@@ -1487,9 +1349,6 @@ class BennetPDFManager(QMainWindow):
             self.status.showMessage(f"Showing {len(self.filtered)} PDF(s).")
 
     def populate_table(self, labels: Dict[str, str]):
-        """
-        Rebuild the table rows from self.filtered using the provided match labels.
-        """
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
 
@@ -1509,16 +1368,12 @@ class BennetPDFManager(QMainWindow):
             ]
             for c, val in enumerate(cols):
                 item = QTableWidgetItem(val)
-                # Store the path in UserRole so we can map rows back to records.
                 item.setData(Qt.ItemDataRole.UserRole, r.path)
                 self.table.setItem(row, c, item)
 
         self.table.setSortingEnabled(True)
 
     def select_record_by_path(self, path: str):
-        """
-        Select a table row corresponding to a specific record path, if present.
-        """
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.data(Qt.ItemDataRole.UserRole) == path:
@@ -1526,9 +1381,6 @@ class BennetPDFManager(QMainWindow):
                 return
 
     def selected_record(self) -> Optional[PDFRecord]:
-        """
-        Return the currently selected PDFRecord from the table, if any.
-        """
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return None
@@ -1542,9 +1394,6 @@ class BennetPDFManager(QMainWindow):
         return None
 
     def on_selection(self):
-        """
-        Update the metadata editor and preview when the table selection changes.
-        """
         r = self.selected_record()
         self.current = r
         if not r:
@@ -1557,24 +1406,17 @@ class BennetPDFManager(QMainWindow):
         self.year_edit.setText(r.year)
         self.notes_edit.setPlainText(r.notes)
         self.path_label.setText(r.path)
-        # Truncate preview to avoid excessive memory usage on huge documents.
         self.preview.setPlainText((r.content or "")[:12000])
 
         self.save_btn.setEnabled(True)
         self.open_btn.setEnabled(True)
 
     def on_sort_changed(self, section: int, order: Qt.SortOrder):
-        """
-        Persist sort preferences whenever the user changes the sort order.
-        """
         self.settings.setValue(SORT_SECTION_KEY, section)
         self.settings.setValue(SORT_ORDER_KEY, int(order.value))
         self.settings.setValue(HEADER_STATE_KEY, self.table.horizontalHeader().saveState())
 
     def clear_right_panel(self):
-        """
-        Clear the metadata editor and preview, disabling actions that require a selection.
-        """
         self.current = None
         self.title_edit.clear()
         self.author_edit.clear()
@@ -1587,11 +1429,6 @@ class BennetPDFManager(QMainWindow):
         self.open_btn.setEnabled(False)
 
     def open_selected(self):
-        """
-        Open the currently selected PDF in the system default viewer.
-
-        Refuses to open files outside the configured home directory.
-        """
         r = self.current or self.selected_record()
         if not r:
             return
@@ -1608,11 +1445,6 @@ class BennetPDFManager(QMainWindow):
             QMessageBox.critical(self, "Open failed", f"{e}")
 
     def save_metadata(self):
-        """
-        Save edited metadata back into the selected PDF and update the cache.
-
-        Validates the year field and refuses to modify files outside the home directory.
-        """
         r = self.current
         if not r:
             return
@@ -1640,10 +1472,8 @@ class BennetPDFManager(QMainWindow):
             return
 
         try:
-            # Persist metadata into the PDF file.
             write_pdf_metadata(r.path, new_title, new_author, new_subject, new_year, new_notes)
 
-            # Update in-memory record.
             r.title = new_title or p.stem
             r.author = new_author
             r.subject = new_subject
@@ -1657,7 +1487,6 @@ class BennetPDFManager(QMainWindow):
             r.size = st.st_size
             r.read_error = ""
 
-            # Merge into cached records on disk.
             records = self.read_cache_records()
             merged = {rec.get("path"): rec for rec in records if isinstance(rec, dict)}
             merged[r.path] = asdict(r)
@@ -1671,9 +1500,6 @@ class BennetPDFManager(QMainWindow):
             QMessageBox.critical(self, "Save failed", f"Could not write metadata:\n\n{e}")
 
     def context_menu(self, pos):
-        """
-        Show a context menu for the current row (open, show in folder, rescan).
-        """
         if not self.selected_record():
             return
         menu = QMenu(self)
@@ -1694,9 +1520,6 @@ class BennetPDFManager(QMainWindow):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _reveal_selected(self):
-        """
-        Reveal the selected PDF in the system file manager.
-        """
         r = self.current or self.selected_record()
         if not r:
             return
@@ -1706,9 +1529,6 @@ class BennetPDFManager(QMainWindow):
             QMessageBox.critical(self, "Reveal failed", f"{e}")
 
     def closeEvent(self, event):
-        """
-        Persist UI state and stop any background worker when the window closes.
-        """
         self.save_ui_state()
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
@@ -1720,12 +1540,21 @@ def main():
     """
     Application entry point: create the QApplication and show the main window.
     """
+    if sys.platform.startswith("win"):
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "dpeana.BennetPDFManager"
+        )
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setOrganizationName(APP_ORG)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(QIcon(resource_path("icon.ico")))
+
     w = BennetPDFManager()
+    w.setWindowIcon(QIcon(resource_path("icon.ico")))
     w.show()
+
     sys.exit(app.exec())
 
 
